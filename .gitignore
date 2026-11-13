@@ -1,0 +1,22 @@
+# Python environments and cache
+.ttss/
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Compiled C/OpenMP executable and object files
+/laplacian_openmp/laplacian_benchmark
+*.o
+
+# Generated dataset and benchmark outputs
+/data/processed/
+/results/laplacian/
+
+# OS files
+.DS_Store
+Thumbs.db
+.vscode/
