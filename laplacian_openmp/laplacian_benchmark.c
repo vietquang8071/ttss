@@ -207,7 +207,7 @@ int main(int argc, char **argv) {
     printf("%s,%d,sequential,0,%.9f,1.000000,0.000000,0,0,PASS\n",
            argv[1], n, t_seq);
 
-    const int thread_counts[] = {1, 2, 4, 8, 12, 16, 20};
+    const int thread_counts[] = {1, 2, 4, 8, 12, 16};
     int all_correct = 1;
     for (size_t k = 0; k < sizeof(thread_counts) / sizeof(thread_counts[0]); ++k) {
         const int threads = thread_counts[k];

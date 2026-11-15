@@ -16,7 +16,7 @@ args = sys.argv[1:]
 if len(args) == 4 and args[2] == '--output':
     shutil.copyfile(args[0], args[3])
 print('file,size,version,threads,median_ms,speedup,efficiency_percent,max_abs_error,rmse,correct')
-for version,threads in [('sequential',0),('openmp',1),('openmp',2),('openmp',4),('openmp',8),('openmp',12),('openmp',16),('openmp',20)]:
+for version,threads in [('sequential',0),('openmp',1),('openmp',2),('openmp',4),('openmp',8),('openmp',12),('openmp',16)]:
     print(f'{args[0]},{args[1]},{version},{threads},1,1,100,0,0,PASS')
 '''
 

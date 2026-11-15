@@ -24,7 +24,7 @@ make
 ./laplacian_benchmark data/processed/1024/image_01.bin 1024 --output laplacian_output.bin
 ```
 
-Output CSV: one Sequential row, then seven OpenMP rows for thread counts 1/2/4/8/12/16/20. Each configuration is warmed up once and timed 10 times; reported timing is the median, and I/O is excluded. `--output` writes the *signed* raw Laplacian float32 response after benchmarking (it is the output of the OpenMP 20-thread run).
+Output CSV: one Sequential row, then six OpenMP rows for thread counts 1/2/4/8/12/16. Each configuration is warmed up once and timed 10 times; reported timing is the median, and I/O is excluded. `--output` writes the *signed* raw Laplacian float32 response after benchmarking (it is the output of the OpenMP 16-thread run).
 
 Read the saved output in Python:
 
