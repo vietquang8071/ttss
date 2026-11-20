@@ -42,15 +42,19 @@ def main() -> None:
             parser.error("--export-images requires NumPy and Pillow: pip install numpy pillow")
 
     all_rows = []
-    # One temporary raw output file can be reused: PNG conversion happens
-    # after C benchmarking, and the raw file is never needed for metrics.
+    # Temporary filter outputs are reused: PNG conversion happens after C
+    # benchmarking, and the files are not needed for the CSV metrics.
     with tempfile.TemporaryDirectory(prefix="laplacian_preview_") as tmp:
         tmp_raw = Path(tmp) / "laplacian.bin"
+        tmp_edges = Path(tmp) / "edges.bin"
         for i, (size, path) in enumerate(tasks, start=1):
             print(f"[{i}/{len(tasks)}] {path}", flush=True)
             command = [str(exe), str(path), str(size)]
             if args.export_images:
-                command.extend(["--output", str(tmp_raw)])
+                command.extend([
+                    "--output", str(tmp_raw),
+                    "--edges-output", str(tmp_edges),
+                ])
             completed = subprocess.run(
                 command, text=True, capture_output=True, check=False,
             )
@@ -60,7 +64,7 @@ def main() -> None:
                     f"{completed.stderr}\n{completed.stdout}"
                 )
             rows = list(csv.DictReader(io.StringIO(completed.stdout)))
-            if len(rows) != 8:
+            if len(rows) != 6:
                 raise ValueError(f"Unexpected benchmark CSV for {path}: {completed.stdout}")
             all_rows.extend(rows)
 
@@ -69,7 +73,7 @@ def main() -> None:
                 png.parent.mkdir(parents=True, exist_ok=True)
                 render = subprocess.run(
                     [sys.executable, str(visualizer), "--input", str(path),
-                     "--laplacian", str(tmp_raw), "--size", str(size),
+                     "--edges", str(tmp_edges), "--size", str(size),
                      "--out", str(png)],
                     text=True, capture_output=True, check=False,
                 )

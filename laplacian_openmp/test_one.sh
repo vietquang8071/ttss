@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Benchmark one preprocessed grayscale image and export CSV, raw .bin, and PNG preview.
+# Benchmark one preprocessed grayscale image and export CSV, signed response, edges, and preview.
 # Usage: ./test_one.sh [SIZE] [IMAGE_NAME_OR_PATH]
 # Example: ./test_one.sh 1024 image_01.bin
 # Optional: DATASET_DIR=/path/to/processed RESULTS_DIR=/path/to/results ./test_one.sh
@@ -62,13 +62,16 @@ NAME="$(basename -- "$INPUT" .bin)"
 OUTPUT_DIR="$RESULTS_DIR/single/$SIZE"
 mkdir -p "$OUTPUT_DIR"
 RAW="$OUTPUT_DIR/${NAME}_${SIZE}_laplacian.bin"
+EDGES="$OUTPUT_DIR/${NAME}_${SIZE}_edges.bin"
 CSV="$OUTPUT_DIR/${NAME}_${SIZE}_metrics.csv"
 PNG="$OUTPUT_DIR/${NAME}_${SIZE}_preview.png"
 
 printf '\n[1/2] Benchmark: %s (%sx%s)\n' "$INPUT" "$SIZE" "$SIZE"
-"$SCRIPT_DIR/laplacian_benchmark" "$INPUT" "$SIZE" --output "$RAW" | tee "$CSV"
+"$SCRIPT_DIR/laplacian_benchmark" "$INPUT" "$SIZE" \
+  --output "$RAW" --edges-output "$EDGES" | tee "$CSV"
 
 printf '\n[2/2] Creating visualization...\n'
-python3 "$SCRIPT_DIR/visualize.py" --input "$INPUT" --laplacian "$RAW" --size "$SIZE" --out "$PNG"
+python3 "$SCRIPT_DIR/visualize.py" --input "$INPUT" --edges "$EDGES" --size "$SIZE" --out "$PNG"
 
-printf '\nOutputs:\n  Metrics: %s\n  Raw:     %s\n  Preview: %s\n' "$CSV" "$RAW" "$PNG"
+printf '\nOutputs:\n  Metrics: %s\n  Response: %s\n  Edges:    %s\n  Preview:  %s\n' \
+  "$CSV" "$RAW" "$EDGES" "$PNG"

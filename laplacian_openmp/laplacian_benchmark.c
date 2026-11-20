@@ -1,9 +1,10 @@
 /*
- * Laplacian filtering benchmark (C11 + OpenMP).
+ * Gaussian-Laplacian zero-crossing benchmark (C11 + OpenMP).
  * Input: headerless, row-major little-endian float32 grayscale image.
- * Usage: ./laplacian_benchmark INPUT.bin SIZE [--output OUTPUT.bin]
- * Input size: SIZE x SIZE pixels.
- * Kernel: [0 1 0; 1 -4 1; 0 1 0], zero padding.
+ * Usage: ./laplacian_benchmark INPUT.bin SIZE [--output SIGNED.bin]
+ *        [--edges-output EDGES.bin] [--sigma SIGMA] [--threshold VALUE]
+ * Gaussian: separable 5-tap kernel, radius 2, clamped-edge padding.
+ * Laplacian: [0 1 0; 1 -4 1; 0 1 0], zero padding.
  */
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
@@ -13,10 +14,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 _Static_assert(sizeof(float) == 4, "This program requires 32-bit float");
 
 #define REPEATS 10
+#define GAUSSIAN_RADIUS 2
+#define GAUSSIAN_TAPS (2 * GAUSSIAN_RADIUS + 1)
 
 static int load_image(const char *path, float *image, size_t pixels) {
     FILE *fp = fopen(path, "rb");
@@ -68,6 +72,110 @@ static int save_image(const char *path, const float *image, size_t pixels) {
     return ok;
 }
 
+static int parse_nonnegative_finite(const char *option, const char *text,
+                                   int strictly_positive, double *value) {
+    char *end = NULL;
+    errno = 0;
+    double parsed = strtod(text, &end);
+    if (errno != 0 || end == text || *end != '\0' || !isfinite(parsed)
+        || parsed < 0.0 || (strictly_positive && parsed == 0.0)) {
+        fprintf(stderr, "Invalid value for %s: %s\n", option, text);
+        return 0;
+    }
+    *value = parsed;
+    return 1;
+}
+
+static int output_paths_conflict(const char *first, const char *second) {
+    if (strcmp(first, second) == 0) return 1;
+    struct stat first_stat;
+    struct stat second_stat;
+    if (stat(first, &first_stat) == 0 && stat(second, &second_stat) == 0
+        && first_stat.st_dev == second_stat.st_dev
+        && first_stat.st_ino == second_stat.st_ino) {
+        return 1;
+    }
+    return 0;
+}
+
+static void make_gaussian_weights(double sigma, float weights[GAUSSIAN_TAPS]) {
+    double values[GAUSSIAN_TAPS];
+    double sum = 0.0;
+    for (int k = 0; k < GAUSSIAN_TAPS; ++k) {
+        const int offset = k - GAUSSIAN_RADIUS;
+        const double scaled_offset = (double)offset / sigma;
+        values[k] = exp(-0.5 * scaled_offset * scaled_offset);
+        sum += values[k];
+    }
+    for (int k = 0; k < GAUSSIAN_TAPS; ++k) {
+        weights[k] = (float)(values[k] / sum);
+    }
+}
+
+static inline int clamp_index(int value, int n) {
+    if (value < 0) return 0;
+    if (value >= n) return n - 1;
+    return value;
+}
+
+static void gaussian_horizontal_sequential(const float *src, float *dst, int n,
+                                           const float weights[GAUSSIAN_TAPS]) {
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n; ++x) {
+            float value = 0.0f;
+            for (int k = 0; k < GAUSSIAN_TAPS; ++k) {
+                const int sx = clamp_index(x + k - GAUSSIAN_RADIUS, n);
+                value += src[(size_t)y * n + sx] * weights[k];
+            }
+            dst[(size_t)y * n + x] = value;
+        }
+    }
+}
+
+static void gaussian_horizontal_openmp(const float *src, float *dst, int n,
+                                       const float weights[GAUSSIAN_TAPS], int threads) {
+    #pragma omp parallel for schedule(static) num_threads(threads)
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n; ++x) {
+            float value = 0.0f;
+            for (int k = 0; k < GAUSSIAN_TAPS; ++k) {
+                const int sx = clamp_index(x + k - GAUSSIAN_RADIUS, n);
+                value += src[(size_t)y * n + sx] * weights[k];
+            }
+            dst[(size_t)y * n + x] = value;
+        }
+    }
+}
+
+static void gaussian_vertical_sequential(const float *src, float *dst, int n,
+                                         const float weights[GAUSSIAN_TAPS]) {
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n; ++x) {
+            float value = 0.0f;
+            for (int k = 0; k < GAUSSIAN_TAPS; ++k) {
+                const int sy = clamp_index(y + k - GAUSSIAN_RADIUS, n);
+                value += src[(size_t)sy * n + x] * weights[k];
+            }
+            dst[(size_t)y * n + x] = value;
+        }
+    }
+}
+
+static void gaussian_vertical_openmp(const float *src, float *dst, int n,
+                                     const float weights[GAUSSIAN_TAPS], int threads) {
+    #pragma omp parallel for schedule(static) num_threads(threads)
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n; ++x) {
+            float value = 0.0f;
+            for (int k = 0; k < GAUSSIAN_TAPS; ++k) {
+                const int sy = clamp_index(y + k - GAUSSIAN_RADIUS, n);
+                value += src[(size_t)sy * n + x] * weights[k];
+            }
+            dst[(size_t)y * n + x] = value;
+        }
+    }
+}
+
 /* Same per-pixel arithmetic for sequential and parallel implementations. */
 static inline float laplacian_pixel(const float *src, int n, int x, int y) {
     const size_t i = (size_t)y * (size_t)n + (size_t)x;
@@ -96,6 +204,67 @@ static void laplacian_openmp(const float *src, float *dst, int n, int threads) {
     }
 }
 
+static inline float zero_crossing_pixel(const float *laplacian, int n,
+                                        int x, int y, double threshold) {
+    if (x <= 0 || y <= 0 || x >= n - 1 || y >= n - 1) return 0.0f;
+    const float center = laplacian[(size_t)y * n + x];
+    if (center == 0.0f) return 0.0f;
+    for (int dy = -1; dy <= 1; ++dy) {
+        const int ny = y + dy;
+        if (ny <= 0 || ny >= n - 1) continue;
+        for (int dx = -1; dx <= 1; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            const int nx = x + dx;
+            if (nx <= 0 || nx >= n - 1) continue;
+            const float neighbor = laplacian[(size_t)ny * n + nx];
+            const int opposite_sign = (center > 0.0f && neighbor < 0.0f)
+                                   || (center < 0.0f && neighbor > 0.0f);
+            if (opposite_sign && fabs((double)center) + fabs((double)neighbor) >= threshold) {
+                return 1.0f;
+            }
+        }
+    }
+    return 0.0f;
+}
+
+static void zero_crossing_sequential(const float *laplacian, float *edges, int n,
+                                     double threshold) {
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n; ++x) {
+            edges[(size_t)y * n + x] = zero_crossing_pixel(laplacian, n, x, y, threshold);
+        }
+    }
+}
+
+static void zero_crossing_openmp(const float *laplacian, float *edges, int n,
+                                 double threshold, int threads) {
+    #pragma omp parallel for schedule(static) num_threads(threads)
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n; ++x) {
+            edges[(size_t)y * n + x] = zero_crossing_pixel(laplacian, n, x, y, threshold);
+        }
+    }
+}
+
+static void pipeline_sequential(const float *input, float *horizontal, float *smoothed,
+                                float *laplacian, float *edges, int n,
+                                const float weights[GAUSSIAN_TAPS], double threshold) {
+    gaussian_horizontal_sequential(input, horizontal, n, weights);
+    gaussian_vertical_sequential(horizontal, smoothed, n, weights);
+    laplacian_sequential(smoothed, laplacian, n);
+    zero_crossing_sequential(laplacian, edges, n, threshold);
+}
+
+static void pipeline_openmp(const float *input, float *horizontal, float *smoothed,
+                            float *laplacian, float *edges, int n,
+                            const float weights[GAUSSIAN_TAPS], double threshold,
+                            int threads) {
+    gaussian_horizontal_openmp(input, horizontal, n, weights, threads);
+    gaussian_vertical_openmp(horizontal, smoothed, n, weights, threads);
+    laplacian_openmp(smoothed, laplacian, n, threads);
+    zero_crossing_openmp(laplacian, edges, n, threshold, threads);
+}
+
 static int compare_double(const void *a, const void *b) {
     const double da = *(const double *)a;
     const double db = *(const double *)b;
@@ -107,23 +276,31 @@ static double median(double *values, int n) {
     return (n % 2) ? values[n / 2] : (values[n / 2 - 1] + values[n / 2]) / 2.0;
 }
 
-static double benchmark_seq(const float *input, float *output, int n) {
+static double benchmark_seq(const float *input, float *horizontal, float *smoothed,
+                            float *laplacian, float *edges, int n,
+                            const float weights[GAUSSIAN_TAPS], double threshold) {
     double times[REPEATS];
-    laplacian_sequential(input, output, n); /* warm-up */
+    pipeline_sequential(input, horizontal, smoothed, laplacian, edges, n, weights, threshold);
     for (int r = 0; r < REPEATS; ++r) {
         double t0 = omp_get_wtime();
-        laplacian_sequential(input, output, n);
+        pipeline_sequential(input, horizontal, smoothed, laplacian, edges, n,
+                            weights, threshold);
         times[r] = (omp_get_wtime() - t0) * 1000.0;
     }
     return median(times, REPEATS);
 }
 
-static double benchmark_omp(const float *input, float *output, int n, int threads) {
+static double benchmark_omp(const float *input, float *horizontal, float *smoothed,
+                            float *laplacian, float *edges, int n,
+                            const float weights[GAUSSIAN_TAPS], double threshold,
+                            int threads) {
     double times[REPEATS];
-    laplacian_openmp(input, output, n, threads); /* warm-up */
+    pipeline_openmp(input, horizontal, smoothed, laplacian, edges, n, weights,
+                    threshold, threads);
     for (int r = 0; r < REPEATS; ++r) {
         double t0 = omp_get_wtime();
-        laplacian_openmp(input, output, n, threads);
+        pipeline_openmp(input, horizontal, smoothed, laplacian, edges, n, weights,
+                        threshold, threads);
         times[r] = (omp_get_wtime() - t0) * 1000.0;
     }
     return median(times, REPEATS);
@@ -157,15 +334,67 @@ static Correctness check_correctness(const float *reference, const float *actual
     return result;
 }
 
+static int edges_match_exactly(const float *reference, const float *actual, size_t pixels) {
+    for (size_t i = 0; i < pixels; ++i) {
+        if (reference[i] != actual[i]) return 0;
+    }
+    return 1;
+}
+
+static void free_buffers(float *input, float *horizontal, float *smoothed,
+                         float *seq_laplacian, float *omp_laplacian,
+                         float *seq_edges, float *omp_edges) {
+    free(input);
+    free(horizontal);
+    free(smoothed);
+    free(seq_laplacian);
+    free(omp_laplacian);
+    free(seq_edges);
+    free(omp_edges);
+}
+
 int main(int argc, char **argv) {
-    if (argc != 3 && argc != 5) {
-        fprintf(stderr, "Usage: %s INPUT.bin SIZE [--output OUTPUT.bin]\n", argv[0]);
+    if (argc < 3) {
+        fprintf(stderr,
+                "Usage: %s INPUT.bin SIZE [--output SIGNED.bin] [--edges-output EDGES.bin] "
+                "[--sigma SIGMA] [--threshold VALUE]\n",
+                argv[0]);
         return EXIT_FAILURE;
     }
-    if (argc == 5 && strcmp(argv[3], "--output") != 0) {
-        fprintf(stderr, "Expected '--output OUTPUT.bin'\n");
+
+    const char *output_path = NULL;
+    const char *edges_output_path = NULL;
+    double sigma = 1.0;
+    double threshold = 10.0;
+    for (int i = 3; i < argc; i += 2) {
+        if (i + 1 >= argc) {
+            fprintf(stderr, "Missing value for option %s\n", argv[i]);
+            return EXIT_FAILURE;
+        }
+        if (strcmp(argv[i], "--output") == 0) {
+            output_path = argv[i + 1];
+        } else if (strcmp(argv[i], "--edges-output") == 0) {
+            edges_output_path = argv[i + 1];
+        } else if (strcmp(argv[i], "--sigma") == 0) {
+            if (!parse_nonnegative_finite(argv[i], argv[i + 1], 1, &sigma)) {
+                return EXIT_FAILURE;
+            }
+        } else if (strcmp(argv[i], "--threshold") == 0) {
+            if (!parse_nonnegative_finite(argv[i], argv[i + 1], 0, &threshold)) {
+                return EXIT_FAILURE;
+            }
+        } else {
+            fprintf(stderr, "Unknown option: %s\n", argv[i]);
+            return EXIT_FAILURE;
+        }
+    }
+
+    if (output_path && edges_output_path
+        && output_paths_conflict(output_path, edges_output_path)) {
+        fprintf(stderr, "--output and --edges-output must refer to different files\n");
         return EXIT_FAILURE;
     }
+
     char *end = NULL;
     errno = 0;
     long parsed = strtol(argv[2], &end, 10);
@@ -186,46 +415,59 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
+    float weights[GAUSSIAN_TAPS];
+    make_gaussian_weights(sigma, weights); /* one-time setup, outside benchmark timing */
+
     float *input = (float *)malloc(pixels * sizeof(float));
-    float *seq_output = (float *)malloc(pixels * sizeof(float));
-    float *omp_output = (float *)malloc(pixels * sizeof(float));
-    if (!input || !seq_output || !omp_output) {
-        fprintf(stderr, "Could not allocate %zu bytes per array\n", pixels * sizeof(float));
-        free(input); free(seq_output); free(omp_output);
+    float *horizontal = (float *)malloc(pixels * sizeof(float));
+    float *smoothed = (float *)malloc(pixels * sizeof(float));
+    float *seq_laplacian = (float *)malloc(pixels * sizeof(float));
+    float *omp_laplacian = (float *)malloc(pixels * sizeof(float));
+    float *seq_edges = (float *)malloc(pixels * sizeof(float));
+    float *omp_edges = (float *)malloc(pixels * sizeof(float));
+    if (!input || !horizontal || !smoothed || !seq_laplacian || !omp_laplacian
+        || !seq_edges || !omp_edges) {
+        fprintf(stderr, "Could not allocate %zu bytes per image buffer\n", pixels * sizeof(float));
+        free_buffers(input, horizontal, smoothed, seq_laplacian, omp_laplacian,
+                     seq_edges, omp_edges);
         return EXIT_FAILURE;
     }
     if (!load_image(argv[1], input, pixels)) {
-        free(input); free(seq_output); free(omp_output);
+        free_buffers(input, horizontal, smoothed, seq_laplacian, omp_laplacian,
+                     seq_edges, omp_edges);
         return EXIT_FAILURE;
     }
 
     omp_set_dynamic(0);
-    double t_seq = benchmark_seq(input, seq_output, n);
+    const double t_seq = benchmark_seq(input, horizontal, smoothed, seq_laplacian,
+                                       seq_edges, n, weights, threshold);
 
     /* All data rows include original filename for straightforward CSV aggregation. */
     printf("file,size,version,threads,median_ms,speedup,efficiency_percent,max_abs_error,rmse,correct\n");
     printf("%s,%d,sequential,0,%.9f,1.000000,0.000000,0,0,PASS\n",
            argv[1], n, t_seq);
 
-    const int thread_counts[] = {1, 2, 4, 8, 12, 16};
+    const int thread_counts[] = {2, 4, 8, 12, 16};
     int all_correct = 1;
     for (size_t k = 0; k < sizeof(thread_counts) / sizeof(thread_counts[0]); ++k) {
         const int threads = thread_counts[k];
-        double t_omp = benchmark_omp(input, omp_output, n, threads);
-        Correctness c = check_correctness(seq_output, omp_output, pixels);
-        double speedup = t_seq / t_omp;
-        double efficiency = 100.0 * speedup / threads;
+        const double t_omp = benchmark_omp(input, horizontal, smoothed, omp_laplacian,
+                                           omp_edges, n, weights, threshold, threads);
+        Correctness c = check_correctness(seq_laplacian, omp_laplacian, pixels);
+        c.correct = c.correct && edges_match_exactly(seq_edges, omp_edges, pixels);
+        const double speedup = t_seq / t_omp;
+        const double efficiency = 100.0 * speedup / threads;
         printf("%s,%d,openmp,%d,%.9f,%.6f,%.6f,%.9g,%.9g,%s\n",
                argv[1], n, threads, t_omp, speedup, efficiency,
                c.max_error, c.rmse, c.correct ? "PASS" : "FAIL");
         if (!c.correct) all_correct = 0;
     }
 
-    /* Write outside the timed region; output stays signed float32. */
+    /* Write outside the timed region; the diagnostic response remains signed. */
     int saved = 1;
-    if (argc == 5) saved = save_image(argv[4], omp_output, pixels);
-    free(input);
-    free(seq_output);
-    free(omp_output);
+    if (output_path) saved = save_image(output_path, omp_laplacian, pixels) && saved;
+    if (edges_output_path) saved = save_image(edges_output_path, omp_edges, pixels) && saved;
+    free_buffers(input, horizontal, smoothed, seq_laplacian, omp_laplacian,
+                 seq_edges, omp_edges);
     return (all_correct && saved) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Benchmark all .bin files; export metrics and PNG previews by default.
+# Benchmark all .bin files; export metrics and binary zero-crossing edge previews by default.
 # Usage: ./run_full.sh [DATASET_DIR] [RESULTS_DIR]
 # Example: ./run_full.sh ../data/processed ../results/laplacian
 # EXPORT_IMAGES=0 ./run_full.sh ...  # CSV-only
@@ -56,5 +56,5 @@ python3 "$SCRIPT_DIR/run_all.py" "${args[@]}"
 printf '\nOutputs:\n  Raw results: %s\n  Summary:     %s\n' \
   "$OUTPUT_DIR/raw_results.csv" "$OUTPUT_DIR/summary.csv"
 if [[ "$EXPORT_IMAGES" == "1" ]]; then
-  printf '  PNG previews: %s\n' "$OUTPUT_DIR/previews"
+  printf '  PNG edge previews: %s\n' "$OUTPUT_DIR/previews"
 fi

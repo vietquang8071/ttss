@@ -1,6 +1,6 @@
-# Laplacian Filtering với C và OpenMP
+# Gaussian–Laplacian Zero-Crossing với C và OpenMP
 
-Dự án đọc ảnh, chuyển ảnh sang dữ liệu grayscale dạng `float32`, rồi chạy bộ lọc Laplacian 3×3 bằng C. Chương trình so sánh phiên bản tuần tự với phiên bản OpenMP ở nhiều số luồng và xuất thời gian chạy cùng sai số kiểm tra.
+Dự án chuyển ảnh đầu vào sang grayscale `float32`, rồi chạy pipeline Gaussian → Laplacian → zero-crossing bằng C/OpenMP. Gaussian separable 5 tap (mặc định σ=1.0) làm mượt ảnh; Laplacian 4 láng giềng dùng zero padding; zero-crossing xét 8 láng giềng và ngưỡng contrast mặc định 10.0 để tạo edge map nhị phân. Chương trình benchmark toàn bộ pipeline tuần tự và OpenMP, đồng thời kiểm tra đáp ứng Laplacian có dấu và edge map.
 
 ## Cấu trúc thư mục
 
@@ -64,7 +64,18 @@ Lệnh tạo 20 file `.bin` cho mỗi kích thước trong `data/processed/512`,
 
 Thay `1024` bằng `512` hoặc `2048` để chạy kích thước khác. Tên file phải khớp với tên ảnh trong `data/raw/`; ví dụ `image_1.jpg` tạo ra `image_1.bin`. Script tự biên dịch chương trình nếu cần.
 
-Kết quả được lưu trong `results/laplacian/single/<kích-thước>/`, gồm CSV đo thời gian, file đầu ra Laplacian `.bin` và ảnh xem trước PNG.
+Kết quả được lưu trong `results/laplacian/single/<kích-thước>/`, gồm CSV đo thời gian, đáp ứng Laplacian có dấu, edge map `.bin` và ảnh xem trước PNG.
+
+Mỗi lần chạy tạo đáp ứng Laplacian có dấu (`*_laplacian.bin`), edge map float32 gồm `0.0`/`1.0` (`*_edges.bin`) và preview đặt ảnh grayscale cạnh edge map nhị phân. Có thể điều chỉnh tham số trực tiếp khi gọi chương trình C:
+
+```bash
+make -C laplacian_openmp
+./laplacian_openmp/laplacian_benchmark data/processed/1024/image_1.bin 1024 \
+  --sigma 1.2 --threshold 14 \
+  --output response.bin --edges-output edges.bin
+```
+
+`--sigma` phải lớn hơn 0; `--threshold` phải không âm. Gaussian dùng clamped-edge padding; Laplacian giữ zero padding. Zero-crossing chỉ đánh dấu cặp điểm khi cả hai nằm bên trong ảnh, có dấu trái nhau và `abs(p) + abs(q) >= threshold`.
 
 ### Chạy toàn bộ benchmark
 
@@ -76,7 +87,9 @@ Script tự biên dịch và chạy tất cả file `.bin` ở ba kích thước
 
 - `raw_results.csv`: số đo cho từng ảnh và cấu hình luồng.
 - `summary.csv`: số liệu tổng hợp theo kích thước, phiên bản và số luồng.
-- `previews/`: ảnh đầu vào đặt cạnh ảnh hiển thị độ lớn Laplacian.
+- `previews/`: ảnh grayscale đặt cạnh edge map zero-crossing nhị phân.
+
+Mỗi ảnh có một dòng Sequential và năm dòng OpenMP (2/4/8/12/16 luồng) trong `raw_results.csv`.
 
 Để chỉ xuất CSV, không tạo ảnh xem trước:
 
